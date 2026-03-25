@@ -104,6 +104,16 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
+        # FASA: Feature Augmentation for Sparse (tail) predicates
+        # Compute per-predicate frequency to identify tail classes
+        fg_matrix = statistics['fg_matrix'].float()  # (num_obj, num_obj, num_rel)
+        pred_counts = fg_matrix.sum(0).sum(0)  # (num_rel,) total count per predicate
+        pred_counts[0] = pred_counts.max()  # background class treated as head
+        median_count = pred_counts.median()
+        self.register_buffer('fasa_tail_mask', (pred_counts < median_count).float())  # 1 for tail, 0 for head
+        self.fasa_noise_std = 0.1  # Gaussian noise std for feature augmentation
+        self.fasa_loss_weight = 0.5  # weight for auxiliary augmentation loss
+
         ##### refine object labels
         self.pos_embed = nn.Sequential(*[
             nn.Linear(9, 32), nn.BatchNorm1d(32, momentum= 0.001),
@@ -241,6 +251,24 @@ class PrototypeEmbeddingNetwork(nn.Module):
             loss_sum = torch.max(torch.zeros(rel_labels.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
             add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
             ### end 
+
+            ### FASA: Feature Augmentation for Sparse (tail) predicates
+            # Identify tail-class samples in the current batch
+            tail_sample_mask = self.fasa_tail_mask[rel_labels.long()] > 0  # (N,) bool
+            if tail_sample_mask.sum() > 0:
+                tail_features = rel_rep[tail_sample_mask]  # (M, D) features of tail samples
+                tail_labels = rel_labels[tail_sample_mask]  # (M,) labels of tail samples
+                # Generate augmented features by adding Gaussian noise
+                noise = torch.randn_like(tail_features) * self.fasa_noise_std
+                aug_features = tail_features + noise
+                # Normalize augmented features
+                aug_features_norm = aug_features / aug_features.norm(dim=1, keepdim=True)
+                # Compute cosine similarity with prototypes
+                aug_logits = aug_features_norm @ predicate_proto_norm.t() * self.logit_scale.exp()
+                # Auxiliary CE loss on augmented features
+                fasa_loss = F.cross_entropy(aug_logits, tail_labels.long())
+                add_losses.update({"fasa_loss": fasa_loss * self.fasa_loss_weight})
+            ### end FASA
  
         return entity_dists, rel_dists, add_losses, add_data
 
