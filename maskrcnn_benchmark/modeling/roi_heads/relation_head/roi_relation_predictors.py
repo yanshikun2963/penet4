@@ -104,10 +104,7 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-        ##### Component 2: Per-class Learnable Temperature
-        # Each predicate class has its own learnable temperature parameter
-        self.per_class_logit_scale = nn.Parameter(torch.ones(self.num_rel_cls) * np.log(1 / 0.07))
-        #####
+
 
         ##### refine object labels
         self.pos_embed = nn.Sequential(*[
@@ -205,10 +202,7 @@ class PrototypeEmbeddingNetwork(nn.Module):
         predicate_proto_norm = predicate_proto / predicate_proto.norm(dim=1, keepdim=True)  # c_norm
 
         ### (Prototype-based Learning  ---- cosine similarity) & (Relation Prediction)
-        ### Component 2: Per-class temperature scaling
-        rel_dists = rel_rep_norm @ predicate_proto_norm.t()
-        rel_dists = rel_dists * self.per_class_logit_scale.exp().unsqueeze(0)
-        ###
+        rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
 
         entity_dists = entity_dists.split(num_objs, dim=0)
@@ -249,11 +243,6 @@ class PrototypeEmbeddingNetwork(nn.Module):
             loss_sum = torch.max(torch.zeros(rel_labels.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
             add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
             ### end 
-
- 
-
-            ### Component 2: Per-class temperature - no extra loss
-            ###
 
  
         return entity_dists, rel_dists, add_losses, add_data
