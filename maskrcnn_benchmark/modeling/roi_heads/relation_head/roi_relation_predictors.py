@@ -104,13 +104,9 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-        ##### DPL: Per-class variance normalization
-        # Each predicate class has a learnable sigma representing its semantic spread
-        # Head predicates (e.g., "on") have large sigma, tail predicates have small sigma
-        self.proto_sigma = nn.Parameter(torch.ones(self.num_rel_cls))  # initialized to 1
-        self.sigma_regularizer = 0.01  # prevents sigma collapse
+        ##### Component 2: Per-class Learnable Temperature
+        self.per_class_logit_scale = nn.Parameter(torch.ones(self.num_rel_cls) * np.log(1 / 0.07))
         #####
-
 
         ##### refine object labels
         self.pos_embed = nn.Sequential(*[
@@ -208,11 +204,9 @@ class PrototypeEmbeddingNetwork(nn.Module):
         predicate_proto_norm = predicate_proto / predicate_proto.norm(dim=1, keepdim=True)  # c_norm
 
         ### (Prototype-based Learning  ---- cosine similarity) & (Relation Prediction)
-        rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
-        # DPL: Normalize by per-class sigma (semantic diversity)
-        # At inference: head classes with large sigma get suppressed
-        sigma_pos = torch.abs(self.proto_sigma) + 1e-6  # ensure positive
-        rel_dists = rel_dists / sigma_pos.unsqueeze(0)
+        # Per-class temperature
+        rel_dists = rel_rep_norm @ predicate_proto_norm.t()
+        rel_dists = rel_dists * self.per_class_logit_scale.exp().unsqueeze(0)
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
 
         entity_dists = entity_dists.split(num_objs, dim=0)
@@ -254,10 +248,6 @@ class PrototypeEmbeddingNetwork(nn.Module):
             add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
             ### end 
 
-            # DPL: Sigma regularization - prevent collapse
-            sigma_pos = torch.abs(self.proto_sigma) + 1e-6
-            sigma_reg = self.sigma_regularizer * (sigma_pos.log().mean() ** 2)
-            add_losses.update({"sigma_reg": sigma_reg})
  
         return entity_dists, rel_dists, add_losses, add_data
 
