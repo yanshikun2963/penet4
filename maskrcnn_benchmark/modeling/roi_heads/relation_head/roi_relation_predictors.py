@@ -104,16 +104,13 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-        ##### Feature Augmentation for Tail Classes (FATC)
-        fg_matrix = statistics['fg_matrix'].float()  # (num_obj, num_obj, num_rel)
-        pred_counts = fg_matrix.sum(0).sum(0)  # total count per predicate
-        pred_counts[0] = pred_counts.max()  # background = head
-        median_count = pred_counts.median()
-        tail_mask = (pred_counts < median_count).float()  # 1 for tail, 0 for head
-        self.register_buffer('fatc_tail_mask', tail_mask)
-        self.fatc_noise_std = 0.1  # Gaussian noise std
-        self.fatc_aug_weight = 0.5  # weight for augmented sample loss
+        ##### DPL: Per-class variance normalization
+        # Each predicate class has a learnable sigma representing its semantic spread
+        # Head predicates (e.g., "on") have large sigma, tail predicates have small sigma
+        self.proto_sigma = nn.Parameter(torch.ones(self.num_rel_cls))  # initialized to 1
+        self.sigma_regularizer = 0.01  # prevents sigma collapse
         #####
+
 
         ##### refine object labels
         self.pos_embed = nn.Sequential(*[
@@ -212,30 +209,16 @@ class PrototypeEmbeddingNetwork(nn.Module):
 
         ### (Prototype-based Learning  ---- cosine similarity) & (Relation Prediction)
         rel_dists = rel_rep_norm @ predicate_proto_norm.t() * self.logit_scale.exp()  #  <r_norm, c_norm> / τ
+        # DPL: Normalize by per-class sigma (semantic diversity)
+        # At inference: head classes with large sigma get suppressed
+        sigma_pos = torch.abs(self.proto_sigma) + 1e-6  # ensure positive
+        rel_dists = rel_dists / sigma_pos.unsqueeze(0)
         # the rel_dists will be used to calculate the Le_sim with the ce_loss
 
         entity_dists = entity_dists.split(num_objs, dim=0)
         rel_dists = rel_dists.split(num_rels, dim=0)
 
         if self.training:
-
-            ### Feature Augmentation for Tail Classes (FATC)
-            rel_labels_cat = cat(rel_labels, dim=0)
-            is_tail = self.fatc_tail_mask[rel_labels_cat.long()]  # (N,) 1 if tail class
-            if is_tail.sum() > 0:
-                # Generate augmented features for tail-class samples
-                tail_idx = is_tail.nonzero(as_tuple=True)[0]
-                tail_features = rel_rep[tail_idx]  # (n_tail, dim)
-                noise = torch.randn_like(tail_features) * self.fatc_noise_std
-                aug_features = tail_features + noise
-                # Normalize augmented features
-                aug_features_norm = aug_features / (aug_features.norm(dim=1, keepdim=True) + 1e-8)
-                # Compute augmented logits and loss
-                aug_logits = aug_features_norm @ predicate_proto_norm.t() * self.logit_scale.exp()
-                aug_labels = rel_labels_cat[tail_idx]
-                fatc_loss = F.cross_entropy(aug_logits, aug_labels.long())
-                add_losses.update({"fatc_loss": self.fatc_aug_weight * fatc_loss})
-            ### end
 
             ### Prototype Regularization  ---- cosine similarity
             target_rpredicate_proto_norm = predicate_proto_norm.clone().detach() 
@@ -270,6 +253,11 @@ class PrototypeEmbeddingNetwork(nn.Module):
             loss_sum = torch.max(torch.zeros(rel_labels.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
             add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
             ### end 
+
+            # DPL: Sigma regularization - prevent collapse
+            sigma_pos = torch.abs(self.proto_sigma) + 1e-6
+            sigma_reg = self.sigma_regularizer * (sigma_pos.log().mean() ** 2)
+            add_losses.update({"sigma_reg": sigma_reg})
  
         return entity_dists, rel_dists, add_losses, add_data
 
